@@ -19,6 +19,8 @@ import (
 	"unsafe"
 )
 
+// CreateDatabase creates a new database with a
+// default user table.
 func CreateDatabase(dbFilePath string) error {
 
 	if fileOrDirExists(dbFilePath) {
@@ -48,17 +50,17 @@ func CreateDatabase(dbFilePath string) error {
 			UserName        TEXT NOT NULL,
 			Email	        TEXT,
 			Password        TEXT,
-			Permissions     TEXT,  /* possible values: r,w, or rw (read, write or read-write) */
+			Permissions     TEXT, /* possible values: r,w, or rw (read, write or read-write) */
 			DateTimeCreated TEXT NOT NULL
 		);
-		CREATE UNIQUE INDEX INX_db_user_UserName ON db_user (UserName);
-		CREATE INDEX INX_db_user_DateTimeCreated ON db_user (DateTimeCreated);
-		insert into db_user
+		CREATE UNIQUE INDEX INX_dbx_user_UserName ON dbx_user (UserName);
+		CREATE INDEX INX_dbx_user_DateTimeCreated ON dbx_user (DateTimeCreated);
+		insert into dbx_user
 		select 1,'administrator','admin',NULL,'password','rw', '%s' 
-		WHERE NOT EXISTS (SELECT 1 FROM db_user WHERE UserName='admin');`, timenow))
-	defer C.free(unsafe.Pointer(sqlx))
-	rc = C.sqlite3_exec(db, sqlx, nil, nil, nil)
+		WHERE NOT EXISTS (SELECT 1 FROM dbx_user WHERE UserName='admin');`, timenow))
 
+	rc = C.sqlite3_exec(db, sqlx, nil, nil, nil)
+	C.free(unsafe.Pointer(sqlx))
 	C.sqlite3_close(db)
 
 	if int(rc) == SQLITE_OK {
