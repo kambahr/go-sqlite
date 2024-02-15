@@ -15,6 +15,16 @@ import (
 	"time"
 )
 
+func prunDoubleSpace(s string) string {
+	for {
+		if !strings.Contains(s, "  ") {
+			break
+		}
+		s = strings.ReplaceAll(s, "  ", " ")
+	}
+	return s
+}
+
 func getRandString() string {
 	b := make([]byte, 8)
 	_, err := rand.Read(b)
