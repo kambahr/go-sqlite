@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 	"unsafe"
@@ -80,6 +81,14 @@ func (d *DB) ExecuteScalare(query string, placeHolders ...any) (any, error) {
 }
 func (d *DB) executeNonQueryDo(query string, placeHolders []any) Result {
 	var resw Result
+	// remove the comments first; as there could be smicolons inside the comment block(s)
+	query = strings.ReplaceAll(query, "\n", " ")
+	regexptxt2 := `(?)` + regexp.QuoteMeta("/*") + `(.*?)` + regexp.QuoteMeta("*/")
+	rx := regexp.MustCompile(regexptxt2)
+	m := rx.FindAllString(query, -1)
+	for i := 0; i < len(m); i++ {
+		query = strings.ReplaceAll(query, m[i], "")
+	}
 	v := strings.Split(query, ";")
 	for i := 0; i < len(v); i++ {
 		sqlx := strings.TrimSpace(v[i])
@@ -226,6 +235,15 @@ func (d *DB) Execute(sqlx string) (int64, error) {
 			resw.err = errors.New("database no longer available")
 		} else {
 			// execute sql statement(s)
+			// remove the comments first; as there could be smicolons inside the comment block(s)
+			sqlx = strings.ReplaceAll(sqlx, "\n", " ")
+			regexptxt2 := `(?)` + regexp.QuoteMeta("/*") + `(.*?)` + regexp.QuoteMeta("*/")
+			rx := regexp.MustCompile(regexptxt2)
+			m := rx.FindAllString(sqlx, -1)
+			for i := 0; i < len(m); i++ {
+				sqlx = strings.ReplaceAll(sqlx, m[i], "")
+			}
+
 			v := strings.Split(sqlx, ";")
 			for i := 0; i < len(v); i++ {
 				query := strings.TrimSpace(v[i])
