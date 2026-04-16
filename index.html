@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>go-sqlite Documentation</title>
+    <style>
+        :root {
+            /* Light Theme Variables */
+            --bg-color: #f9f9f9;
+            --sidebar-bg: #ffffff;
+            --text-color: #333333;
+            --header-bg: #e0e0e0;
+            --border-color: #dddddd;
+            --link-color: #0066cc;
+            --link-hover: #004499;
+            --code-bg: #f4f4f4;
+            --active-bg: #e6f2ff;
+        }
+
+        body.dark-mode {
+            /* Dark Theme Variables */
+            --bg-color: #1e1e1e;
+            --sidebar-bg: #252526;
+            --text-color: #cccccc;
+            --header-bg: #333333;
+            --border-color: #444444;
+            --link-color: #4da6ff;
+            --link-hover: #99ccff;
+            --code-bg: #111111;
+            --active-bg: #37373d;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            display: grid;
+            grid-template-columns: 300px 1fr;
+            grid-template-rows: 60px 1fr;
+            height: 100vh;
+            overflow: hidden;
+            transition: background-color 0.3s, color 0.3s;
+        }
+
+        header {
+            grid-column: 1 / 3;
+            grid-row: 1;
+            background-color: var(--header-bg);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 20px;
+            z-index: 10;
+        }
+
+        #header-title {
+            font-size: 1.5rem;
+            font-weight: 600;
+        }
+
+        .theme-toggle {
+            background: none;
+            border: 1px solid var(--border-color);
+            color: var(--text-color);
+            padding: 8px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .theme-toggle:hover {
+            background-color: var(--border-color);
+        }
+
+        nav {
+            grid-column: 1;
+            grid-row: 2;
+            background-color: var(--sidebar-bg);
+            border-right: 1px solid var(--border-color);
+            overflow-y: auto;
+            padding: 15px 0;
+        }
+
+        .tree-group {
+            margin-bottom: 10px;
+        }
+
+        .tree-group-title {
+            padding: 8px 20px;
+            font-weight: 600;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            color: #888;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .tree-node {
+            padding: 8px 20px 8px 40px;
+            cursor: pointer;
+            font-size: 0.95rem;
+            list-style: none;
+            transition: background 0.2s;
+        }
+
+        .tree-node:hover {
+            background-color: var(--border-color);
+        }
+
+        .tree-node.active {
+            background-color: var(--active-bg);
+            font-weight: 600;
+            border-left: 4px solid var(--link-color);
+            padding-left: 36px;
+        }
+
+        main {
+            grid-column: 2;
+            grid-row: 2;
+            overflow-y: auto;
+            padding: 40px;
+            line-height: 1.6;
+        }
+
+        .content-section { display: none; }
+        .content-section.active { display: block; animation: fadeIn 0.3s; }
+
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+        h1 { margin-bottom: 20px; font-size: 2rem; border-bottom: 1px solid var(--border-color); padding-bottom: 10px; }
+        h2 { margin: 20px 0 10px 0; font-size: 1.4rem; }
+        p { margin-bottom: 15px; }
+        
+        pre {
+            background-color: var(--code-bg);
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin-bottom: 20px;
+            border: 1px solid var(--border-color);
+            font-family: Consolas, Monaco, 'Andale Mono', 'Ubuntu Mono', monospace;
+            font-size: 0.9rem;
+        }
+
+        .signature {
+            font-weight: bold;
+            color: var(--link-color);
+        }
+
+        .related-links {
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px dashed var(--border-color);
+        }
+
+        .related-links ul {
+            list-style-type: none;
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+
+        .related-links li a {
+            color: var(--link-color);
+            text-decoration: none;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
+        .related-links li a:hover {
+            text-decoration: underline;
+            color: var(--link-hover);
+        }
+
+        svg { width: 16px; height: 16px; fill: currentColor; }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div id="header-title">go-sqlite Documentation</div>
+        <button class="theme-toggle" onclick="toggleTheme()">
+            <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm0-14c-3.31 0-6 2.69-6 6s2.69 6 6 6V6z"/></svg>
+            Toggle Theme
+        </button>
+    </header>
+
+    <nav id="treeview">
+        </nav>
+
+    <main id="content-container">
+        </main>
+
+    <script>
+        const docData = [
+            {
+                group: "Connection & Setup",
+                icon: '<svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg>',
+                nodes: [
+                    {
+                        id: "Open",
+                        name: "Open",
+                        signature: "func Open(dbFilePath string, pragma ...string) (*DB, error)",
+                        desc: "Opens a read-write SQLite database and returns a pointer to DB. The <code>pragma</code> argument is an optional list of PRAGMA commands to be applied before the database is ready for operation, typically journal-mode PRAGMAs. Defaults to <code>PRAGMA main.secure_delete = ON</code> if not specified. Files that do not exist will return an error.",
+                        related: ["OpenMemory", "CreateDatabase", "Close"]
+                    },
+                    {
+                        id: "OpenMemory",
+                        name: "OpenMemory",
+                        signature: "func OpenMemory(vfsName ...string) (*DB, error)",
+                        desc: "Creates and opens an in-memory SQLite database. Internally it generates a unique URI with <code>?cache=shared</code>. Very useful for temporary data operations, caching, or testing. Can also be called via alias <code>CreateDabaseInMemory</code>.",
+                        related: ["Open", "Close"]
+                    },
+                    {
+                        id: "CreateDatabase",
+                        name: "CreateDatabase",
+                        signature: "func CreateDatabase(dbFilePath string, noBuiltInTables ...bool) error",
+                        desc: "Initializes a new database file on disk, generating the sub-directory path if it does not exist. Unless <code>noBuiltInTables</code> is true, it automatically provisions a default administrative <code>dbx_user</code> table.",
+                        related: ["Open"]
+                    },
+                    {
+                        id: "Close",
+                        name: "Close",
+                        signature: "func (d *DB) Close() error",
+                        desc: "Drops all connections to the database and releases its file handle. If the database belongs to a <code>DBGroup</code>, ensure you call <code>DBGroup.Remove(db)</code> to clean up background processes.",
+                        related: ["Open", "DBGroup"]
+                    }
+                ]
+            },
+            {
+                group: "Query Execution",
+                icon: '<svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2h12c1.1 0 2-.9 2-2V8l-6-6zm-2 16c-2.05 0-3.81-1.24-4.58-3h1.71c.63.9 1.68 1.5 2.87 1.5 1.93 0 3.5-1.57 3.5-3.5S13.93 9.5 12 9.5c-1.35 0-2.52.78-3.1 1.9l1.6 1.6h-4V9l1.3 1.3C8.69 8.92 10.23 8 12 8c2.76 0 5 2.24 5 5s-2.24 5-5 5z"/></svg>',
+                nodes: [
+                    {
+                        id: "Exec",
+                        name: "Exec",
+                        signature: "func (d *DB) Exec(query string, placeHolders ...any) Result",
+                        desc: "Executes an SQL query safely with placeholders and returns a <code>Result</code> type. Features automatic retry logic if the database is locked, looping up to a timeout threshold. Ideal for INSERT, UPDATE, and DELETE operations.",
+                        related: ["ExecuteNonQuery", "Prepare", "ExecuteScalare"]
+                    },
+                    {
+                        id: "ExecuteNonQuery",
+                        name: "ExecuteNonQuery",
+                        signature: "func (d *DB) ExecuteNonQuery(query string, placeholders ...any) (int64, error)",
+                        desc: "A wrapper around <code>Exec</code> that directly returns the number of <code>rowsAffected</code>. Simplifies code when the inserted ID or full Result struct is not needed.",
+                        related: ["Exec"]
+                    },
+                    {
+                        id: "ExecuteScalare",
+                        name: "ExecuteScalare",
+                        signature: "func (d *DB) ExecuteScalare(query string, placeHolders ...any) (any, error)",
+                        desc: "Executes an SQL statement that is expected to return a single value (e.g., <code>SELECT COUNT(*) FROM table</code>). Internally utilizes <code>GetDataTable</code> and returns the single interface{} result.",
+                        related: ["GetDataTable", "Exec"]
+                    }
+                ]
+            },
+            {
+                group: "Data Retrieval",
+                icon: '<svg viewBox="0 0 24 24"><path d="M3 3v18h18V3H3zm16 16H5V5h14v14zM7 7h10v2H7zm0 4h10v2H7zm0 4h7v2H7z"/></svg>',
+                nodes: [
+                    {
+                        id: "GetDataTable",
+                        name: "GetDataTable",
+                        signature: "func (d *DB) GetDataTable(query string, placeHolders ...any) (*DataTable, error)",
+                        desc: "Fetches an entire result set into memory as a <code>DataTable</code> object. The operation is globally synced (<code>mCMutex</code>) to prevent CGO pointer desyncing during highly concurrent calls. Very robust for reading data, managing alias types, and analyzing schema.",
+                        related: ["Query", "ExportToCSV", "DataTableToJSON"]
+                    },
+                    {
+                        id: "Query",
+                        name: "Query",
+                        signature: "func (d *DB) Query(query string, placeHolders ...any) (*Rows, error)",
+                        desc: "Executes an SQL statement and returns a pointer to a <code>Rows</code> object. Use this when you want to manually iterate through rows via <code>Next()</code> and <code>Scan()</code> instead of loading everything into memory via <code>DataTable</code>.",
+                        related: ["Rows_Scan", "Rows_Next", "GetDataTable"]
+                    },
+                    {
+                        id: "GetPage",
+                        name: "GetPage",
+                        signature: "func (d *DB) GetPage(pageSize int64, pageNo int64, tableName string, filter string, sortBy string, sortOrder string) (DataTable, error)",
+                        desc: "A built-in pagination helper. Returns a <code>DataTable</code> of a specific table using LIMIT and OFFSET, customized by the provided filters and sorting.",
+                        related: ["GetDataTable"]
+                    }
+                ]
+            },
+            {
+                group: "Rows Iteration",
+                icon: '<svg viewBox="0 0 24 24"><path d="M4 6h16v2H4zm0 5h16v2H4zm0 5h16v2H4z"/></svg>',
+                nodes: [
+                    {
+                        id: "Rows_Next",
+                        name: "Next",
+                        signature: "func (rs *Rows) Next() bool",
+                        desc: "Advances the cursor to the next row of the query result. Automatically finalizes the C statement and closes the row reader if it reaches the end (<code>SQLITE_ROW</code> != true).",
+                        related: ["Rows_Scan", "Query"]
+                    },
+                    {
+                        id: "Rows_Scan",
+                        name: "Scan",
+                        signature: "func (rs *Rows) Scan(arg ...any) error",
+                        desc: "Maps the columns of the current row to the provided pointer arguments. Performs dynamic type conversion (e.g., SQLite INTEGER to Go bool or int64, SQLite TEXT to Go time.Time).",
+                        related: ["Rows_Next", "Query"]
+                    },
+                    {
+                        id: "GetStringInt",
+                        name: "GetString / GetInt",
+                        signature: "func (rs *Rows) GetString(colName any) string \nfunc (rs *Rows) GetInt(colName any) int",
+                        desc: "Convenience functions to retrieve the value of a specific column by its string name for the current row, abstracting away pointer casting.",
+                        related: ["Rows_Scan"]
+                    }
+                ]
+            },
+            {
+                group: "Utilities & Export",
+                icon: '<svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>',
+                nodes: [
+                    {
+                        id: "DBGroup",
+                        name: "DBGroup Manager",
+                        signature: "var DBGrp IDBGroup = &DBGroup{}",
+                        desc: "A global tracking structure for open databases. It runs a background routine to ping databases, evict dead connections, and automatically execute <code>VACUUM</code> when freelist threshold is met, ensuring optimal memory footprint.",
+                        related: ["Open"]
+                    },
+                    {
+                        id: "Encryption",
+                        name: "Encrypt / Decrypt",
+                        signature: "func EncryptDBFile(dbPath string, encFilePath string, pwdPhrs string) error\nfunc DecryptDBFile(encFilePath string, desFile string, pwdPhrs string) error",
+                        desc: "Encrypts or decrypts the SQLite file via a lightweight pass-phrase system. Ensure the database is safely flushed or closed before executing an encryption process.",
+                        related: ["Open"]
+                    },
+                    {
+                        id: "ExportToCSV",
+                        name: "ExportToCSV",
+                        signature: "func (dt *DataTable) ExportToCSV(destFilePath string) error",
+                        desc: "Dumps the memory contents of a <code>DataTable</code> straight to a physical CSV file on disk. Escapes columns natively.",
+                        related: ["GetDataTable", "DataTableToJSON"]
+                    },
+                    {
+                        id: "DataTableToJSON",
+                        name: "DataTableToJSON",
+                        signature: "func (d *DB) DataTableToJSON(dt DataTable) string",
+                        desc: "Formats an entire <code>DataTable</code> object into a valid JSON Array string. Ideal for building API responses out of database views.",
+                        related: ["GetDataTable", "ExportToCSV"]
+                    }
+                ]
+            }
+        ];
+
+        function init() {
+            const tree = document.getElementById('treeview');
+            const main = document.getElementById('content-container');
+
+            docData.forEach(group => {
+                // Nav Group
+                const groupEl = document.createElement('div');
+                groupEl.className = 'tree-group';
+                
+                const titleEl = document.createElement('div');
+                titleEl.className = 'tree-group-title';
+                titleEl.innerHTML = `${group.icon} ${group.group}`;
+                groupEl.appendChild(titleEl);
+
+                group.nodes.forEach(node => {
+                    const nodeEl = document.createElement('div');
+                    nodeEl.className = 'tree-node';
+                    nodeEl.id = `nav-${node.id}`;
+                    nodeEl.textContent = node.name;
+                    nodeEl.onclick = () => showContent(node.id);
+                    groupEl.appendChild(nodeEl);
+
+                    // Main Content Section
+                    const contentEl = document.createElement('div');
+                    contentEl.className = 'content-section';
+                    contentEl.id = `content-${node.id}`;
+
+                    let relatedLinksHTML = node.related.map(r => `<li><a onclick="showContent('${r}')">${r}</a></li>`).join('');
+
+                    contentEl.innerHTML = `
+                        <h1>${node.name}</h1>
+                        <pre><code class="signature">${node.signature}</code></pre>
+                        <p>${node.desc}</p>
+                        
+                        <div class="related-links">
+                            <strong>Related Methods:</strong>
+                            <ul>${relatedLinksHTML}</ul>
+                        </div>
+                    `;
+                    main.appendChild(contentEl);
+                });
+
+                tree.appendChild(groupEl);
+            });
+
+            // Load first item
+            if(docData.length > 0 && docData[0].nodes.length > 0) {
+                showContent(docData[0].nodes[0].id);
+            }
+        }
+
+        function showContent(id) {
+            // Hide all content
+            document.querySelectorAll('.content-section').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tree-node').forEach(el => el.classList.remove('active'));
+
+            // Show target
+            const targetContent = document.getElementById(`content-${id}`);
+            const targetNav = document.getElementById(`nav-${id}`);
+
+            if(targetContent && targetNav) {
+                targetContent.classList.add('active');
+                targetNav.classList.add('active');
+                
+                // Update header
+                const nodeName = targetNav.textContent;
+                document.getElementById('header-title').textContent = `go-sqlite / ${nodeName}`;
+            }
+        }
+
+        function toggleTheme() {
+            document.body.classList.toggle('dark-mode');
+        }
+
+        window.onload = init;
+    </script>
+</body>
+</html>
