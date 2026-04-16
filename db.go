@@ -1,6 +1,7 @@
-// The author disclaims copyright to this source code
-// as it is dedicated to the public domain.
-// For more information, please refer to <https://unlicense.org>.
+// Copyright (C) 2024 Kamiar Bahri.
+// Use of this source code is governed by
+// Boost Software License - Version 1.0
+// that can be found in the LICENSE file.
 
 package gosqlite
 
@@ -13,9 +14,9 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"public/lib/util"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -82,6 +83,8 @@ func (d *DB) AttachDB(dbFilePathToAttach string, attchName string) (bool, error)
 	return true, err
 }
 
+// CopyDatabase uses the VACUUM INTO method to copy
+// a dataase to antoher file.
 func (d *DB) CopyDatabase(dbFileToCopyTo string) error {
 
 	if d.Closed {
@@ -128,23 +131,28 @@ func (d *DB) CloneDB(destPath string) error {
 
 	CreateDatabase(destPath)
 
-	err = BackupOnlineDB(d, destPath, 0, /* no wait-time between copying pages*/
+	// This will make sure the database is not "offline"
+	dx, err := DBGrp.Get(destPath)
+	if err != nil {
+		return err
+	}
+
+	err = BackupOnlineDB(d, destPath, 5, 0, /* no wait-time between copying pages*/
 		nil, "",
 		/*
 		   these are optional params to make sure the backup
 		   does not conitnue if the database is busy or locked
 		*/
-		backup_raise_err_on_busy, backup_raise_err_on_dblocked)
+		BackupRaiseErrOnBusy, BackupRaiseErrOnDBLocked)
 	if err != nil {
 		return err
 	}
 
-	// This (open/close of db) remove the journal files gracefully.
-	dx, err := DBGrp.Get(destPath)
-	if err != nil {
-		return err
+	// This (open/close of db) removes the journal files gracefully.
+
+	if len(dx) > 0 {
+		DBGrp.Remove(dx[0])
 	}
-	DBGrp.Remove(dx[0])
 
 	return nil
 }
@@ -160,40 +168,55 @@ func (d *DB) Busy() bool {
 	return false
 }
 
-func (d *DB) DeleteJournalfiles(dbFilePath string) {
-	fileName := filepath.Base(dbFilePath)
-	fileNameNoExt := strings.TrimSuffix(fileName, filepath.Ext(fileName))
-	dir := filepath.Dir(dbFilePath)
-
-	shm := fmt.Sprintf("%s/.%s-sqlite-shm", dir, fileNameNoExt)
-	os.Remove(shm)
-
-	wal := fmt.Sprintf("%s/.%s-sqlite-wal", dir, fileNameNoExt)
-	os.Remove(wal)
-
-	j := fmt.Sprintf("%s//%s-journal", dir, fileNameNoExt)
-	os.Remove(j)
-}
-
 func (d *DB) TableExists(tableName string) bool {
 
 	sqlx := fmt.Sprintf(`select COUNT(*) from %s LIMIT 1 OFFSET 0`, tableName)
 	_, err := d.ExecuteScalare(sqlx)
-	if err != nil {
-		return false
-	}
 
-	return true
+	return err == nil
 }
 
-func (d *DB) ReOpen() {
-	fp := d.FilePath()
-	DBGrp.Remove(d)
-	d, _ = OpenV2(fp,
-		"PRAGMA main.journal_mode = DELETE",
-		"PRAGMA main.secure_delete = ON;")
+// ReOpen closes the database, removes it from its group
+// and opens it again.
+func (d *DB) ReOpen() error {
+	var err error
+	jm := "PRAGMA main.journal_mode = TRUNCATE"
 
-	DBGrp.Add(d)
+	fp := ""
+	if d.DBHwnd != nil {
+		fp = d.FilePath()
+		d.Close()
+	} else {
+		// not open
+		_, err = OpenV2(fp, jm)
+		return err
+	}
+
+	DBGrp.Remove(d)
+	d, err = OpenV2(fp, jm)
+	if err != nil {
+		if strings.Contains(err.Error(), "database is locked") {
+			// try to delete the jounal file(s) and try one more time
+			DeleteJournalfiles(fp)
+			d, err = OpenV2(fp, jm)
+			if err != nil {
+				return err
+			}
+		}
+
+		if err != nil {
+			return err
+		}
+	}
+
+	if d.DBHwnd != nil {
+		DBGrp.Add(d)
+
+		dx, _ := DBGrp.Get(fp)
+		d.DBHwnd = dx[0].DBHwnd
+	}
+
+	return nil
 }
 
 func (d *DB) TurnOffAutoIncrement(tableName string) error {
@@ -209,8 +232,8 @@ func (d *DB) TurnOffAutoIncrement(tableName string) error {
 	// Create a new temp-table with AutoIncrement
 	var tblSQL string
 	var tblSQLArr []string
-	cols := d.getTableColumns(tableName)
-	for i := 0; i < len(cols); i++ {
+	cols := d.GetTableColumns(tableName)
+	for i := range cols {
 		s := ""
 		if cols[i].IsAutoIncrement {
 			s = fmt.Sprintf(`"%s" INTEGER`, cols[i].Name)
@@ -237,7 +260,7 @@ func (d *DB) TurnOffAutoIncrement(tableName string) error {
 
 	// select the non virtual columns from the original table for the insert statement
 	var col []string
-	allCols := d.getTableColumns(tableName)
+	allCols := d.GetTableColumns(tableName)
 	for i := 0; i < len(allCols); i++ {
 		if allCols[i].IsGeneratedAlways {
 			continue
@@ -299,7 +322,7 @@ func (d *DB) TurnOnAutoIncrement(tableName string, colName string, reoderAutoInr
 	// Create a new temp-table with AutoIncrement
 	var tblSQL string
 	var tblSQLArr []string
-	cols := d.getTableColumns(tableName)
+	cols := d.GetTableColumns(tableName)
 	for i := 0; i < len(cols); i++ {
 		if i == 0 {
 			// add the auto-inc column to the top
@@ -330,7 +353,7 @@ func (d *DB) TurnOnAutoIncrement(tableName string, colName string, reoderAutoInr
 	}
 	// select the non virtual columns from the original table for the insert statement
 	var col []string
-	allCols := d.getTableColumns(tableName)
+	allCols := d.GetTableColumns(tableName)
 	for i := 0; i < len(allCols); i++ {
 		if allCols[i].IsGeneratedAlways {
 			continue
@@ -450,7 +473,7 @@ func (d *DB) CopyTableToDatabase(tbleNameToCopy string, targetDBFilePath string,
 	// ** get the auto-increment column, if any
 	autoIncmntCol := ""
 	if append && recreateAutoIncrementCol {
-		cols := dbTrgt[0].getTableColumns(tbleNameToCopy)
+		cols := dbTrgt[0].GetTableColumns(tbleNameToCopy)
 		for i := 0; i < len(cols); i++ {
 			if cols[i].IsAutoIncrement {
 				autoIncmntCol = cols[i].Name
@@ -493,6 +516,7 @@ func (d *DB) CopyTableToDatabase(tbleNameToCopy string, targetDBFilePath string,
 
 	return newTableName, err
 }
+
 func reopenDB(d *DB) error {
 	fp := d.FilePath()
 	DBGrp.Remove(d)
@@ -508,7 +532,7 @@ func (d *DB) copyTableToDatabaseBulkInsert(newTableName string, tbleNameToCopyFr
 
 	// select the non virtual columns from the original table for the insert statement
 	var col []string
-	allCols := d.getTableColumns(tbleNameToCopyFrom)
+	allCols := d.GetTableColumns(tbleNameToCopyFrom)
 	for i := 0; i < len(allCols); i++ {
 		if allCols[i].IsGeneratedAlways || allCols[i].IsAutoIncrement {
 			continue
@@ -573,7 +597,7 @@ func (d *DB) IsColumnAutoIncrement(colName string, tableName string) (bool, erro
 
 	return false, err
 }
-func (d *DB) GetInsertSQLFromDataTableRow(dtRow map[string]interface{}, tableName string) (string, error) {
+func (d *DB) GetInsertSQLFromDataTableRow(dtRow map[string]any, tableName string) (string, error) {
 
 	var cols []string
 	for key, _ := range dtRow {
@@ -638,7 +662,7 @@ func (d *DB) GetInsertSQLFromDataTableRow(dtRow map[string]interface{}, tableNam
 
 	return sqlx, nil
 }
-func (d *DB) isString(value interface{}) (interface{}, bool) {
+func (d *DB) isString(value any) (any, bool) {
 
 	strVal := fmt.Sprintf("%v", value)
 
@@ -673,11 +697,11 @@ func (d *DB) isString(value interface{}) (interface{}, bool) {
 func (d *DB) EncryptTable(tName string) error {
 
 	/*
-	** t1 assum the table is with rowid?
-	** t2 create a shadow table
-	** any row added to t1 is encrypted
+	** table1 assum the table is with rowid?
+	** table2 create a shadow table
+	** any row added to table1 is encrypted
 	** for each column a hash of the [unencrypted]
-	**
+	** ???
 	 */
 
 	return errors.New("NOT YET IMPLEMENTED")
@@ -718,6 +742,7 @@ func (d *DB) DropView(viewName string) error {
 	if err != nil {
 		return err
 	}
+
 	// close the excluse connection
 	dbExclusive.Close()
 
@@ -776,13 +801,17 @@ func (d *DB) DropTable(tableName string, vaccumAfter ...bool) error {
 	return nil
 }
 
-func (d *DB) Describe() DBStat {
-
+func (d *DB) Describe(dbFilePropertiesOnly ...bool) DBStat {
 	var dx DBStat
+	getAll := true
+	if len(dbFilePropertiesOnly) > 0 && dbFilePropertiesOnly[0] {
+		getAll = false
+	}
 	stats, err := os.Stat(d.filePath)
 	if err == nil {
 		dx.FilePath = d.filePath
 		dx.Name = d.Name
+		dx.SizeBytes = stats.Size()
 		// Get the db size
 		st := ""
 		var xf float64
@@ -807,59 +836,69 @@ func (d *DB) Describe() DBStat {
 		dx.LastModified = stats.ModTime()
 		dx.Size = st
 
-		// Get the objects
-		sqlx := "select * from sqlite_master order by [type] desc;"
-		rs := d.GetResultSet(sqlx)
-		m := rs.ResultTable
-		if err != nil {
-			return DBStat{}
-		} else if m != nil && len(m) > 0 {
+		if getAll {
+			// Get the objects
+			sqlx := "select * from sqlite_master order by [type] desc;"
+			rs := d.GetResultSet(sqlx)
+			m := rs.ResultTable
+			if err != nil {
+				return DBStat{}
+			} else if len(m) > 0 {
+				// get tables
+				var tbls []Table
+				var indxes []Index
+				var views []View
+				var trgs []Trigger
+				for j := 0; j < len(m); j++ {
+					oName := m[j]["name"].(string)
+					oSql := m[j]["sql"].(string)
+					rp, _ := m[j]["rootpage"].(int64)
 
-			// get tables
-			var tbls []Table
-			var indxes []Index
-			var views []View
-			var trgs []Trigger
-			for j := 0; j < len(m); j++ {
-				oName := m[j]["name"].(string)
-				oSql := m[j]["sql"].(string)
-				rp, _ := m[j]["rootpage"].(int64)
-				if m[j]["type"].(string) == "table" {
-					tbls = append(tbls, Table{
-						Name:      oName,
-						Columns:   d.getTableColumns(oName),
-						RootPage:  uint(rp),
-						CreateSQL: oSql,
-					})
+					switch m[j]["type"].(string) {
+					case "table":
+						tbls = append(tbls, Table{
+							Name:      oName,
+							Columns:   d.GetTableColumns(oName),
+							RootPage:  uint(rp),
+							CreateSQL: oSql,
+						})
 
-				} else if m[j]["type"].(string) == "view" {
-					views = append(views, View{
-						Name:      oName,
-						CreateSQL: oSql,
-						RootPage:  uint(rp),
-					})
+					case "view":
+						views = append(views, View{
+							Name:      oName,
+							CreateSQL: oSql,
+							RootPage:  uint(rp),
+						})
 
-				} else if m[j]["type"].(string) == "trigger" {
-					trgs = append(trgs, Trigger{
-						Name:      oName,
-						CreateSQL: oSql,
-						RootPage:  uint(rp),
-					})
+					case "trigger":
+						trgs = append(trgs, Trigger{
+							Name:      oName,
+							CreateSQL: oSql,
+							RootPage:  uint(rp),
+						})
 
-				} else if m[j]["type"].(string) == "index" {
-					indxes = append(indxes, Index{
-						Name:      oName,
-						Columns:   d.getIndexColumns(oSql),
-						CreateSQL: oSql,
-						RootPage:  uint(rp),
-					})
+					case "index":
+						indxes = append(indxes, Index{
+							Name:      oName,
+							Columns:   d.getIndexColumns(oSql),
+							CreateSQL: oSql,
+							RootPage:  uint(rp),
+						})
+					}
 				}
+
+				dx.Tables = tbls
+				dx.Indexes = indxes
+				dx.Triggers = trgs
+				dx.Views = views
 			}
-			dx.Tables = tbls
-			dx.Indexes = indxes
-			dx.Triggers = trgs
-			dx.Views = views
 		}
+	}
+
+	// add the page_count
+	dt, _ := d.GetDataTable("PRAGMA main.page_count;")
+	if len(dt.Rows) > 0 {
+		dx.PageCount = dt.Rows[0]["page_count"].(int64)
 	}
 
 	return dx
@@ -870,6 +909,8 @@ func (d *DB) Describe() DBStat {
 // to select a cmd param. Example:
 //
 //	Get(gosqlite.CmdParam().CollationList)
+//
+// You can also use GetDataTable ro run PRAGMA commands.
 func (d *DB) Get(cmdParam string) ([]map[string]any, error) {
 
 	var err error
@@ -908,7 +949,7 @@ func (d *DB) GetDBHandleUsers() ([]string, error) {
 	}
 
 	if d == nil {
-		return fUsers, errors.New("database refernce is null")
+		return fUsers, errors.New("database reference is null")
 	}
 
 	cmdText := fmt.Sprintf("fuser %s", d.FilePath())
@@ -923,14 +964,14 @@ func (d *DB) GetDBHandleUsers() ([]string, error) {
 	fuser = strings.TrimSpace(strings.ReplaceAll(fuser, "  ", " "))
 	v := strings.Split(fuser, " ")
 
-	for i := 0; i < len(v); i++ {
+	for i := range v {
 		if v[i] == "" {
 			continue
 		}
 		pIDs = append(pIDs, v[i])
 	}
 
-	for i := 0; i < len(pIDs); i++ {
+	for i := range pIDs {
 		out.Reset()
 		cmdText = fmt.Sprintf("ps -ax | grep %s", pIDs[i])
 		cmd = exec.Command("bash", "-c", cmdText)
@@ -953,8 +994,15 @@ func (d *DB) GetDBHandleUsers() ([]string, error) {
 	return fUsers, nil
 }
 
-func (d *DB) GetPage(pageSize int, pageNo int, tableName string, filter string, orderBy string, sortOrder string) (DataTable, error) {
-	var dt *DataTable
+func (d *DB) GetPage(pageSize int64, pageNo int64, tableName string, filter string, orderBy string, sortOrder string) (DataTable, error) {
+
+	// var dt *DataTable
+	dt := new(DataTable)
+	if pageSize > 500 {
+		err := errors.New("page size exceeded maximum size of 1000")
+		dt.Err = err
+		return *dt, err
+	}
 
 	sqly := fmt.Sprintf("select type from sqlite_master where lower([name]) = '%s';", strings.ToLower(tableName))
 	tRes, _, _ := d.Prepare(sqly, []any{})
@@ -977,7 +1025,7 @@ func (d *DB) GetPage(pageSize int, pageNo int, tableName string, filter string, 
 		filter = strings.TrimSpace(filter)
 	}
 
-	cols := d.getTableColumns(tableName)
+	cols := d.GetTableColumns(tableName)
 
 	ci, err := d.GetPagingInfo(pageSize, pageNo, tableName, filter)
 	if err != nil {
@@ -1009,7 +1057,7 @@ func (d *DB) GetPage(pageSize int, pageNo int, tableName string, filter string, 
 	where := ""
 	if filter != "" {
 		where = "where ("
-		for i := 0; i < len(cols); i++ {
+		for i := range cols {
 			where = fmt.Sprintf("%s [%s] LIKE '%%%s%%' OR", where, cols[i].Name, filter)
 		}
 		where = strings.TrimSuffix(where, " OR") // remove the extra OR from the end
@@ -1024,11 +1072,27 @@ func (d *DB) GetPage(pageSize int, pageNo int, tableName string, filter string, 
 	// enclose the statement inside () and select * from it
 	sqlx = fmt.Sprintf("select * from (%s) %s %s limit %d offset %d", sqlx, where, order, ci.PageSize, offset)
 
-	dt, err = d.GetDataTable(sqlx)
-	if err != nil {
-		if dt != nil {
-			dt.Err = err
-		}
+	// omit offset for better peformance
+	// cr := fmt.Sprintf(" _rowid_ > %d", ci.PositionTo-ci.PageSize)
+	// if where == "" {
+	// 	cr = fmt.Sprintf(" WHERE %s", cr)
+	// } else {
+	// 	cr = fmt.Sprintf(" AND %s", cr)
+	// }
+	// sqlx = fmt.Sprintf("SELECT * FROM (%s) %s %s %s limit %d", sqlx, where, cr, order, ci.PageSize)
+	// fmt.Println(sqlx)
+	// fmt.Println(sqlxy)
+	// fmt.Println("--------------")
+
+	// var itbl IDataTableOp = &DataTableOp{MaxTries: 3, MillSecToWait: 150, db: d}
+	// x := itbl.get(sqlx)
+	// dt = &x
+
+	dt, _ = d.GetDataTable(sqlx)
+	if dt.Err != nil {
+		// if dt != nil {
+		// 	dt.Err = err
+		// }
 		var dtx DataTable
 		return dtx, err
 	}
@@ -1043,7 +1107,7 @@ func (d *DB) GetPage(pageSize int, pageNo int, tableName string, filter string, 
 }
 
 // GetPageOffset returns totalPages, offset, pageNo
-func (d *DB) GetPageOffset(recordCount int, pageSize int, pageNo int) (int, int, int) {
+func (d *DB) GetPageOffset(recordCount int64, pageSize int64, pageNo int64) (int64, int64, int64) {
 
 	if pageSize < 1 || recordCount < 1 {
 		return 0, 0, 0
@@ -1087,7 +1151,7 @@ func (d *DB) GetPageOffset(recordCount int, pageSize int, pageNo int) (int, int,
 }
 
 // GetPagingInfo returns the collectionInfo on a table
-func (d *DB) GetPagingInfo(pageSize int, pageNo int, tableName string, filter string) (CollectionInfo, error) {
+func (d *DB) GetPagingInfo(pageSize int64, pageNo int64, tableName string, filter string) (CollectionInfo, error) {
 
 	var ci CollectionInfo
 
@@ -1106,7 +1170,7 @@ func (d *DB) GetPagingInfo(pageSize int, pageNo int, tableName string, filter st
 		if filter != "" {
 			where = "where ("
 			// get all columns
-			cols := d.getTableColumns(tableName)
+			cols := d.GetTableColumns(tableName)
 			for i := 0; i < len(cols); i++ {
 				where = fmt.Sprintf("%s [%s] LIKE '%%%s%%' OR", where, cols[i].Name, filter)
 			}
@@ -1117,14 +1181,14 @@ func (d *DB) GetPagingInfo(pageSize int, pageNo int, tableName string, filter st
 		sc = fmt.Sprintf("select count(*) from [%s] %s", tableName, where)
 	}
 
-	recordCount := 0
+	var recordCount int64
 
 	rObj, err := d.ExecuteScalare(sc)
 	if err != nil {
 		return ci, err
 	}
 	if rObj != nil {
-		recordCount = int(rObj.(int64))
+		recordCount = rObj.(int64)
 	}
 
 	totalPages, offset, pageNo := d.GetPageOffset(recordCount, pageSize, pageNo)
@@ -1239,7 +1303,7 @@ func (d *DB) SaveSchemaToFile(schema string, dbFilePath string) error {
 		return errors.New("invalid file name")
 	}
 
-	if strings.ToLower(d.filePath) == strings.ToLower(dbFilePath) && !d.Closed {
+	if strings.EqualFold(d.filePath, dbFilePath) && !d.Closed {
 		return errors.New("cannot save to an open database")
 	}
 
@@ -1259,6 +1323,91 @@ func (d *DB) SaveSchemaToFile(schema string, dbFilePath string) error {
 	return nil
 }
 
+func (d *DB) Interrupt() bool {
+
+	if d.Closed {
+		return false
+	}
+
+	C.sqlite3_interrupt(d.DBHwnd)
+	rc := C.sqlite3_is_interrupted(d.DBHwnd)
+
+	return int(rc) == 1
+}
+
+// StmtReadOnly evaludates an SQL satement to see if it modifes anything in database.
+// From sqlitec: "This routine returns false if there is any possibility that the
+// statement might change the database file.  ^A false return does
+// not guarantee that the statement will change the database file.
+// ^For example, an UPDATE statement might have a WHERE clause that
+// makes it a no-op, but the sqlite3_stmt_readonly() result would still
+// be false.  ^Similarly, a CREATE TABLE IF NOT EXISTS statement is a
+// read-only no-op if the table already exists, but
+// sqlite3_stmt_readonly() still returns false for such a statement.
+//
+// If prepared statement X is an [EXPLAIN] or [EXPLAIN QUERY PLAN]
+// statement, then sqlite3_stmt_readonly(X) returns the same value as
+// if the EXPLAIN or EXPLAIN QUERY PLAN prefix were omitted."
+func (d *DB) StmtReadOnly(sqlx string) bool {
+
+	sqlxx := strings.ToLower(sqlx)
+	sqlxx = strings.TrimSpace(util.RemoveDoubleSpace(sqlxx))
+
+	if strings.HasPrefix(sqlxx, "update ") ||
+		strings.HasPrefix(sqlxx, "insert ") ||
+		strings.HasPrefix(sqlxx, "create ") ||
+		strings.HasPrefix(sqlxx, "drop ") ||
+		strings.HasPrefix(sqlxx, "delete ") {
+
+		return false
+	}
+
+	var ppStmt *C.sqlite3_stmt /* Statement handle */
+	var zSql *C.char
+
+	nByte := len(sqlx)
+	zSql = C.CString(sqlx)
+	defer C.free(unsafe.Pointer(zSql))
+
+	pzTail := C.CString("")
+	defer C.free(unsafe.Pointer(pzTail))
+
+	defer C.sqlite3_finalize(ppStmt)
+
+	rcx := C.sqlite3_prepare_v2(d.DBHwnd, zSql, C.int(nByte), &ppStmt, &pzTail)
+	if rcx != SQLITE_OK {
+		return true // can't be used, can't update => readonly
+	}
+
+	readonly := int(C.sqlite3_stmt_readonly(ppStmt)) > 0
+
+	return readonly
+}
+
+func (d *DB) MemoryUsed() int64 {
+
+	rc := C.sqlite3_memory_used()
+
+	return int64(rc)
+}
+
+func (d *DB) TotalChanges() int64 {
+	return int64(C.sqlite3_changes64(d.DBHwnd))
+}
+
+func (d *DB) DataVersion() uint32 {
+	dt, _ := d.PRAGMAGetResult("data_version")
+	return uint32(dt.Rows[0][dt.Columns[0].Name].(int64))
+}
+
+// PageCount retuns the page count of the current database.
+func (d *DB) PageCount() int64 {
+
+	dt, _ := d.PRAGMAGetResult("page_count")
+
+	return dt.Rows[0][dt.Columns[0].Name].(int64)
+}
+
 func (d *DB) Ping() int {
 	if !d.Closed {
 		return 0
@@ -1266,6 +1415,8 @@ func (d *DB) Ping() int {
 	return 1
 }
 
+// TxBegin returns a txID for the transaction to be
+// committed or rolled back to.
 func (d *DB) TxBegin() (string, error) {
 	b := make([]byte, 8)
 	_, err := rand.Read(b)
@@ -1286,6 +1437,7 @@ func (d *DB) TxBegin() (string, error) {
 
 	return restPoint, nil
 }
+
 func (d *DB) TxRollback(txID string) error {
 
 	sqlx := fmt.Sprintf(`ROLLBACK TO SAVEPOINT  "%s";`, txID)
@@ -1301,13 +1453,20 @@ func (d *DB) TxRollback(txID string) error {
 	sqlx = fmt.Sprintf(`RELEASE "%s";`, txID)
 	sqlxx = C.CString(sqlx)
 	res = C.sqlite3_exec(d.DBHwnd, sqlxx, nil, nil, nil)
+
 	return getSQLiteErr(res, d.DBHwnd)
 }
+
 func (d *DB) TxCommit(txID string) error {
 	sqlx := fmt.Sprintf(`RELEASE "%s";`, txID)
 	sqlxx := C.CString(sqlx)
 	defer C.free(unsafe.Pointer(sqlxx))
 
 	res := C.sqlite3_exec(d.DBHwnd, sqlxx, nil, nil, nil)
+
 	return getSQLiteErr(res, d.DBHwnd)
+}
+
+func (d *DB) AutoCommit() bool {
+	return int(C.sqlite3_get_autocommit(d.DBHwnd)) == 1
 }

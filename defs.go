@@ -1,6 +1,7 @@
-// The author disclaims copyright to this source code
-// as it is dedicated to the public domain.
-// For more information, please refer to <https://unlicense.org>.
+// Copyright (C) 2024 Kamiar Bahri.
+// Use of this source code is governed by
+// Boost Software License - Version 1.0
+// that can be found in the LICENSE file.
 
 package gosqlite
 
@@ -17,9 +18,10 @@ var DBGrp IDBGroup = &DBGroup{}
 
 // GetResultSetSeqNo is incremented every time a request comes in
 // for GetDataTable. It keep track of the order of the request.
-// It is useful to track requests; it is also returned to the caller.
+// It is used to track requests; it is also returned to the caller.
 // This is sepcially helpful when the caller is using multiple threads
-// where result are returned out-of-order (not by the order the request.
+// where results are returned out-of-order (not by the order in which
+// reques was received).
 var GetResultSetSeqNo uint
 
 // maxConcurrentRequest is a global counter, of all connections
@@ -53,7 +55,17 @@ type Rows struct {
 	stmt     *Stmt
 	db       *DB
 	colCount int
-	intfc    IRows // this makes sure IRows is implemented
+	columns  []string
+	intfc    IRows  // this makes sure IRows is implemented
+	NotUsed  string // for gobs - to have one exported field
+}
+type IRows interface {
+	Columns() ([]string, error)
+	Close() error
+
+	// Next gets the next step of a query.
+	Next() bool
+	Scan(dest ...any) error
 }
 
 type SQLiteVersion struct {
@@ -65,9 +77,11 @@ type SQLiteVersion struct {
 const (
 	NON_QUERY  uint8 = 0
 	DATA_TABLE uint8 = 1
+	SCALARE    uint8 = 2
 )
 const (
-	reqverb_sqlite3 string = "sqlite3Request"
+	reqverb_sqlite3          string = "sqlite3Request"
+	defaultPRAGMAJournalMode string = "PRAGMA main.journal_mode = TRUNCATE"
 )
 
 // QueryResult is used by the Exec callbck to
@@ -128,9 +142,13 @@ type queryResult struct {
 	QueryType             uint8
 }
 type DBStat struct {
-	Size            string // i.e. 1,350KB, 2,535MB, 1.45GB
+	// Size returns the database size in string format; i.e. 1,350KB, 2,535MB, 1.45GB
+	Size      string
+	SizeBytes int64
+
 	Name            string
 	FilePath        string
+	PageCount       int64
 	FilePathHidden  bool
 	DateTimeCreated time.Time
 	LastModified    time.Time
@@ -179,16 +197,16 @@ type DataTable struct {
 	// the data is fetched.
 	Err error `json:"err"`
 
-	CollInfo CollectionInfo
+	CollInfo CollectionInfo `json:"collection-info"`
 }
 
 type CollectionInfo struct {
-	RecordCount  int
-	TotalPages   int
-	PageSize     int
-	PageNo       int
-	PositionFrom int
-	PositionTo   int
+	RecordCount  int64 `json:"recored-count"`
+	TotalPages   int64 `json:"total-pages"`
+	PageSize     int64 `json:"page-size"`
+	PageNo       int64 `json:"page-no"`
+	PositionFrom int64 `json:"position-from"`
+	PositionTo   int64 `json:"position-to"`
 }
 
 type DataRow []map[string]any
@@ -227,6 +245,15 @@ type Table struct {
 	CreateSQL string
 	RootPage  uint
 }
+
+func (t *Table) GetPage(db *DB, pageSize int64, pageNo int64, tableName string, filter string, orderBy string, sortOrder string) (DataTable, error) {
+	return db.GetPage(pageSize, pageNo, t.Name, filter, orderBy, sortOrder)
+}
+
+func (t *Table) Drop(db *DB) error {
+	return db.DropTable(t.Name)
+}
+
 type Index struct {
 	Name      string
 	CreateSQL string
@@ -260,12 +287,21 @@ type Connection struct {
 }
 
 type DB struct {
-	// DBHwnd is a pointer to the sqlite3 structure.
+	// DBHwnd is a pointer to the sqlite3 C structure.
 	DBHwnd *C.sqlite3
 
-	filePath      string // full path of the database file.
-	daemonStarted bool
-	isInMemory    bool // whether the db is created in memory
+	IsOffLine   bool   `json:"is-offline"`
+	Description string `json:"description"`
+
+	// MaxSizeMB restricts the growth of a database.
+	// The default value is 0, which means unlimited.
+	MaxSizeMB uint32 `json:"max-size-db"`
+
+	// Expires makes a database temporary.
+	// It will be deleted after the expiration datetime.
+	Expires  time.Time `json:"expires"`
+	Expired  bool
+	DiskFull bool
 
 	// not unique; e.g. name can be used to get a list of
 	// databse by name. See IDBGroup.Get()
@@ -277,19 +313,39 @@ type DB struct {
 	ConnString  string
 
 	// InMemory are objects created in-memory regarless of how
-	// a database was opened. e.g. a database opened via a vile
+	// a database was opened. e.g. a database opened via a file
 	// can create in-memory tables.
 	// See PRAGMA temp_store on https://www.sqlite.org/pragma.html
-	InMemory InMemoryObjects
+	InMemory    InMemoryObjects
+	DataTableOp IDataTableOp
 
-	BackupProgress func(xPagesCopied int, yTotalPages int, data string)
+	BackupProgress func(xPagesCopied int, yTotalPages int, err string, data string)
 
 	Connections []Connection
 
 	TimeOpened time.Time
 
+	Post IPost
+
 	getResultSetConnections uint
 	intfce                  IDB // this makes sure IDB is implemented
+
+	filePath      string // full path of the database file.
+	daemonStarted bool
+	isInMemory    bool // whether the db is created in memory
+
+	// 00callQueue               IQueue
+	eQueueWrite *exeQueue
+	eQueueRead  *exeQueue
+	eQueueQuery *exeQueue
+	mutex       sync.Mutex
+	tStmtQBusy  bool
+	tStmtQ      []sqlStmt
+}
+
+type sqlStmt struct {
+	SQLText string
+	Args    []any
 }
 
 // sqlite3_dbfile_emtpy_header is a hex of the first 32 bytes of an sqlite3
@@ -343,8 +399,9 @@ const (
 	SQLITE_DONE       = 101 /* sqlite3_step() has finished executing */
 )
 const (
-	backup_raise_err_on_busy     = "backup-raise-err-on-busy"
-	backup_raise_err_on_dblocked = "backup-raise-err-on-dblocked"
+	BackupRaiseErrOnBusy     = "backup-raise-err-on-busy"
+	BackupRaiseErrOnDBLocked = "backup-raise-err-on-dblocked"
+	BackupNoLoop             = "backup-no-loop"
 )
 
 // open flags

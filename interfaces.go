@@ -1,11 +1,19 @@
-// The author disclaims copyright to this source code
-// as it is dedicated to the public domain.
-// For more information, please refer to <https://unlicense.org>.
+// Copyright (C) 2024 Kamiar Bahri.
+// Use of this source code is governed by
+// Boost Software License - Version 1.0
+// that can be found in the LICENSE file.
 
 package gosqlite
 
+import "context"
+
 // IDB is an instance for a single database.
 type IDB interface {
+
+	// <!--
+	// AutoCommit tells if auto-commit is on.
+	AutoCommit() bool
+	// -->
 
 	// <!--
 	// Base exposes all properties of DB to the caller
@@ -57,11 +65,19 @@ type IDB interface {
 	// auto-increment column will be re-create so that the integer numbers are
 	// reset form 1 to n.
 	CopyTableToDatabase(tbleNameToCopy string, targetDBFilePath string, dropIfExists bool, append bool, CopyTableToDatabase bool) (string, error)
+
+	// <!--
+	// DataVersion executes PRAGNA data_version.
+	// The return is the nuumber of the current version.
+	// SQLite increments this nuumber after each insert/delete.
+	DataVersion() uint32
 	// -->
 
 	// <!--
 	// Describe returns a full description of a database.
-	Describe() DBStat
+	// if noDesc is true, only size and page count are
+	// calculated; this is done for speed.
+	Describe(noDesc ...bool) DBStat
 	// -->
 
 	DetachDB(attchName string) error
@@ -91,9 +107,14 @@ type IDB interface {
 	// -->
 
 	// <!--
+	// Exec executes an query using a context; it returns a Result type.
+	ExecWithContext(ctx context.Context, query string, placeHolders ...any) Result
+	// -->
+
+	// <!--
 	// Execute executes an sql statement and returns the error.
 	// see: https://sqlite.org/cintro.html.
-	// It does not process prepared statements; only exists satements
+	// It does not process prepared statements; only executes satements
 	// as they are.
 	Execute(sqlx string) (int64, error)
 	// -->
@@ -112,6 +133,12 @@ type IDB interface {
 	// FilePath returns the value of filePath. It is
 	// read-only as it is required for attaching datbases.
 	FilePath() string
+	// -->
+
+	// <!--
+	// GetTableColumns returns an array of Column for a
+	// table. A Column is a full descropton of a table's field.
+	GetTableColumns(tableName string) []Column
 	// -->
 
 	// <!--
@@ -173,7 +200,7 @@ type IDB interface {
 	// GetPage returns a DataTable of a table; using LIMIT and OFFSET to
 	// query on a spacific range, hence PageSize and Page Number. The result-set
 	// can be filtered by a parital SQL statement and also have sort directions.
-	GetPage(pageSize int, pageNo int, tableName string, filter string, sortBy string, sortOrder string) (DataTable, error)
+	GetPage(pageSize int64, pageNo int64, tableName string, filter string, sortBy string, sortOrder string) (DataTable, error)
 	// -->
 
 	// <!--
@@ -185,17 +212,50 @@ type IDB interface {
 	// -->
 
 	// <!--
+	// Interrupt causes any pending database operation to abort.
+	// It returns true if interrupted.
+	Interrupt() bool
+	// -->
+
+	// <!--
 	// IsInMemory returns true if the database was created in-memeory.
 	IsInMemory() bool
 	// -->
 
+	// <!--
 	// IsColumnAutoIncrement returns whether a column is set as
 	// auto-increment. It will return error if it does not exist.
 	IsColumnAutoIncrement(colName string, tableName string) (bool, error)
+	// -->
 
+	// <!--
+	// MemoryUsed the number of bytes of memory currently
+	// outstanding (alloated but not freed).
+	MemoryUsed() int64
+	// -->
+
+	// <!--
 	// Ping sends the state of the database to the caller.
 	// 0 => open, 1 => closed.
 	Ping() int
+	// -->
+
+	// <!--
+	// PageCount retuns the page count of the current database.
+	PageCount() int64
+
+	// -->
+	// <!--
+	// Prepare initializes an sql statement.
+	// Aargs:
+	// sqlx: SQL statement, UTF-8 encoded,
+	// placeHolders list place-holders in the sql statement,
+	// Return:
+	// Stmt: A pointer to the prepared statement,
+	// End of parsed string (unused portion of sql),
+	// error: error
+	Prepare(sqlx string, placeHolders []any) (Stmt, string, error)
+	// -->
 
 	// <!--
 	// Query executes an sql statement and returns a pointer to
@@ -215,9 +275,42 @@ type IDB interface {
 	RemoveAllAttachedDBs() error
 	// -->
 
+	// <!--
+	// Rename Table renames a table.
 	RenameTable(tableName string, newtableName string) error
+	// -->
 
+	//<!--
+	// StmtReadOnly evaludates an SQL satement to see if it modifes anything in database.
+	// From sqlitec: "This routine returns false if there is any possibility that the
+	// statement might change the database file.  ^A false return does
+	// not guarantee that the statement will change the database file.
+	// ^For example, an UPDATE statement might have a WHERE clause that
+	// makes it a no-op, but the sqlite3_stmt_readonly() result would still
+	// be false.  ^Similarly, a CREATE TABLE IF NOT EXISTS statement is a
+	// read-only no-op if the table already exists, but
+	// sqlite3_stmt_readonly() still returns false for such a statement.
+	//
+	// If prepared statement X is an [EXPLAIN] or [EXPLAIN QUERY PLAN]
+	// statement, then sqlite3_stmt_readonly(X) returns the same value as
+	// if the EXPLAIN or EXPLAIN QUERY PLAN prefix were omitted."
+	StmtReadOnly(sqlx string) bool
+	//-->
+
+	// <!-- TableExists returns true if a table exists.
 	TableExists(tableName string) bool
+	// -->
+
+	// <!--
+	// TotalChanges returns the global number of changes
+	// in a database. It can be used to determine updates
+	// occurred in a database.
+	TotalChanges() int64
+	// -->
+
+	// <!--
+	TruncateTable(tblName string) (err error)
+	// -->
 
 	// <!--
 	// TurnOffAutoIncrement removes the auto-increment attribute of a primary-key
@@ -225,7 +318,7 @@ type IDB interface {
 	TurnOffAutoIncrement(tableName string) error
 	// --->
 
-	// <!--.
+	// <!--
 	// TurnOnAutoIncrement will turn a column into an auto-increment (primary-key) column
 	TurnOnAutoIncrement(tableName string, colName string, reoderAutoInrecValues ...bool) error
 	// -->
@@ -252,25 +345,32 @@ type IDB interface {
 	// -->
 }
 
-type IRows interface {
-	Columns() ([]string, error)
-	Close() error
-	// Next gets the next step of a query.
-	Next() bool
-	Scan(dest ...any) error
+type RmtResult struct {
+	RowsAffected int64 `json:"rows-affected"`
+	LastInsertId int64 `json:"last-insert-id"`
+	Err          error `json:"error"`
+
+	// ElapsedTime is the result of TimeDurration.String()
+	// e.g. 31.316159ms
+	ElapsedTime string `json:"elapsed-time"`
 }
 
 type Result struct {
-	rowsAffected int64   `json:"rowsAffected"`
-	lastInsertId int64   `json:"lastInsertId"`
-	err          error   `json:"err"`
-	intfce       IResult // this ensures IResult is implemented
+	rowsAffected int64
+	lastInsertId int64
+	err          error
+	// PageCount    int64
+
+	intfce  IResult // this ensures IResult is implemented
+	NotUsed string  // this is so that there is one exported field
 }
 
 // A Result summarizes an executed SQL command.
 type IResult interface {
 	// LastInsertId returns the last max-value of the built-in _rowid_.
 	LastInsertId() (int64, error)
+
+	// PageCount() int64
 
 	// RowsAffected returns the number of rows affected by an
 	// update, insert, or delete.
@@ -298,9 +398,11 @@ type IDBGroup interface {
 	// found, otherwise it will return an error.
 	// The return []*DB is a list of open databases.
 	// Note:
-	//   ** a database on can multiple connection, so  []*DB can
-	//      have duplicate databases.
-	Get(s string) ([]*DB, error)
+	//   ** a database can have multiple connections,
+	//      so []*DB can have duplicate entries.
+	Get(s string, pragma ...string) ([]*DB, error)
+	Find(dbFilePath string) *DB
+	Exists(dbFilePath string) bool
 
 	// Count returns count of open databases
 	Count() int

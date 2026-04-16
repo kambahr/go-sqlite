@@ -1,6 +1,7 @@
-// The author disclaims copyright to this source code
-// as it is dedicated to the public domain.
-// For more information, please refer to <https://unlicense.org>.
+// Copyright (C) 2024 Kamiar Bahri.
+// Use of this source code is governed by
+// Boost Software License - Version 1.0
+// that can be found in the LICENSE file.
 
 package gosqlite
 
@@ -20,15 +21,20 @@ import (
 // initDB creates a new instance of DB.
 // If dbFilePath is emtpy an in-memory DB
 // is assumed.
-func initDB(dbFilePath string) DB {
+func initDB(dbFilePath string, inMemory ...bool) DB {
 
 	var inMem InMemoryObjects
+
+	x := false
+	if len(inMemory) > 0 && inMemory[0] {
+		x = true
+	}
 
 	var db = DB{
 		DBHwnd:     nil,
 		filePath:   dbFilePath,
 		UniqueName: createHash(dbFilePath),
-		isInMemory: len(dbFilePath) == 0,
+		isInMemory: x, // len(dbFilePath) == 0,
 		ConnPool: ConnectionPool{
 			MaxOpenConns:          0, /* 0 means unlimited */
 			MaxIdleConns:          0, /* 0 means unlimited */
@@ -40,11 +46,14 @@ func initDB(dbFilePath string) DB {
 		ConnString:              fmt.Sprintf("file_path=%s", dbFilePath),
 		Name:                    strings.TrimSuffix(path.Base(dbFilePath), ".sqlite"), /* default */
 		getResultSetConnections: 0,
+		Post:                    postInit(),
 	}
 
 	db.intfce = &db
 	inMem.db = &db
 	db.InMemory = inMem
+
+	//initQueue(&db)
 
 	return db
 }
@@ -67,6 +76,7 @@ func fixPragmaTextAndOrder(pragArry []string) []string {
 			}
 			pragArry[i] = strings.ReplaceAll(pragArry[i], "  ", " ")
 		}
+		pragArry[i] = strings.ReplaceAll(pragArry[i], " (", "()")
 		pragArry[i] = strings.ToLower(pragArry[i])
 		if !strings.HasSuffix(pragArry[i], ";") {
 			pragArry[i] = fmt.Sprintf("%s;", pragArry[i])
@@ -83,12 +93,15 @@ func fixPragmaTextAndOrder(pragArry []string) []string {
 			break
 		}
 	}
+
 	if wallExists {
 		// the wall and the checkpoint pragma statements
 		// have to be in consecutive order.
 		var s []string
 		s = append(s, "pragma journal_mode = wal;")
-		s = append(s, "pragma wal_checkpoint(passive);")
+
+		// see: https://sqlite.org/pragma.html#pragma_wal_checkpoint
+		s = append(s, "pragma wal_checkpoint(FULL);")
 
 		for i := 0; i < len(pragArry); i++ {
 			if !strings.Contains(pragArry[i], "wal_checkpoint") &&
@@ -166,9 +179,9 @@ func (d *DB) getTableNameTextOnly(tableName string) string {
 	return tableName
 }
 
-// getTableColumns returns an array of Column for a
+// GetTableColumns returns an array of Column for a
 // table. A Column is a full descropton of a table's field.
-func (d *DB) getTableColumns(tableName string) []Column {
+func (d *DB) GetTableColumns(tableName string) []Column {
 
 	var cols []Column
 	var sqlx string
@@ -288,34 +301,30 @@ func (d *DB) getTableColumns(tableName string) []Column {
 // getTableNameFromSQLQuery parses the table name from an SQL statement.
 func getTableNameFromSQLQuery(sqlQuery string) string {
 
+	const from string = " from "
 	sqlQueryLower := strings.TrimSpace(strings.ToLower(sqlQuery))
-	sqlQueryLower = strings.ReplaceAll(sqlQueryLower, "(select ", "")
-	sqlQueryLower = strings.ReplaceAll(sqlQueryLower, "_rowid_", "")
-	sqlQueryLower = prunDoubleSpace(sqlQueryLower)
-	sqlQueryLower = strings.TrimSpace(sqlQueryLower)
-
-	for i := 0; i < 100; i++ {
-		pos := strings.Index(sqlQueryLower, "from ")
-		if pos < 0 {
-			pos = strings.Index(sqlQueryLower, "from(")
-			if pos < 0 {
-				pos = strings.Index(sqlQueryLower, "from (")
+	sqlQueryLower = removeDoubleSpace(sqlQueryLower)
+	var frmArr = []string{"from (", "from("}
+	for i := range frmArr {
+		frm := frmArr[i]
+		for {
+			v := strings.Split(sqlQueryLower, frm)
+			if len(v) > 1 {
+				sqlQueryLower = v[1]
+			} else {
+				sqlQueryLower = v[0]
+				break
 			}
 		}
-
-		if pos < 0 {
-			break
-		}
-
-		sqlQueryLower = strings.TrimSpace(sqlQueryLower[pos+1+len("from"):])
-		sqlQueryLower = strings.TrimSpace(strings.TrimPrefix(sqlQueryLower, "("))
-		sqlQueryLower = strings.TrimSpace(strings.TrimSuffix(sqlQueryLower, ")"))
 	}
-
-	x := strings.Split(sqlQueryLower, " ")
-	tblName := x[0] // the top element is the table name
-	tblName = strings.TrimSpace(strings.TrimPrefix(tblName, "("))
-	tblName = strings.TrimSpace(strings.TrimSuffix(tblName, ")"))
+	tblName := ""
+	pos := strings.Index(sqlQueryLower, from)
+	lenOK := len(sqlQueryLower) > pos+len(from)+1
+	if pos > 0 && lenOK {
+		tblName = sqlQueryLower[pos+len(from):]
+	}
+	v := strings.Split(tblName, " ")
+	tblName = v[0]
 
 	return tblName
 }
@@ -398,7 +407,7 @@ func (d *DB) waiForQueryResult(queryID *string, timeoutSec int) QueryResult {
 	}
 }
 
-// getStmtColVal gets a single column in an SQL
+// getStmtColVal gets a single column's value in an SQL
 // statement based on its ordinal position.
 func (d *DB) getStmtColVal(s *Stmt, colIndx int) any {
 	var v any
@@ -445,9 +454,9 @@ func getSQLiteErr(res C.int, dbHwnd *C.sqlite3) error {
 	}
 }
 
-// processRequestQueue loops thru the global result queue and
-// calls execWithResults() on requests that have not yet been
-// started.
+// processRequestQueue loops thru the global result
+// queue and calls execWithResults() on requests that
+// have not yet been started.
 func (d *DB) processRequestQueue() {
 	for i := 0; i < len(mResultQueue); i++ {
 		if !mResultQueue[i].Processed && !mResultQueue[i].Received && !mResultQueue[i].Started {

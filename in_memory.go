@@ -1,6 +1,7 @@
-// The author disclaims copyright to this source code
-// as it is dedicated to the public domain.
-// For more information, please refer to <https://unlicense.org>.
+// Copyright (C) 2024 Kamiar Bahri.
+// Use of this source code is governed by
+// Boost Software License - Version 1.0
+// that can be found in the LICENSE file.
 
 package gosqlite
 
@@ -18,6 +19,26 @@ type InMemoryObjects struct {
 	db     *DB
 }
 
+func (i *InMemoryObjects) formatSQL(s string) string {
+
+	for range 5 {
+		s = strings.ReplaceAll(s, "\n", " ")
+		s = strings.ReplaceAll(s, "\t", " ")
+		s = strings.ReplaceAll(s, ", ", ",")
+		s = strings.ReplaceAll(s, "( ", "( ")
+		s = strings.ReplaceAll(s, ") ", ") ")
+		s = removeDoubleSpace(s)
+
+		s = strings.TrimSpace(s)
+		if !strings.HasPrefix(s, ";") {
+			s = s + ";"
+		}
+		s = strings.ReplaceAll(s, ";;", ";")
+	}
+
+	return s
+}
+
 // CreateTable creates a table in-memory, regardless
 // of how the its database was opened; as a database opened
 // via a file can still create in-memory tables.
@@ -26,20 +47,13 @@ func (i *InMemoryObjects) CreateTable(sqlx string) (Table, error) {
 	var t Table
 	var cols []Column
 
-	sqlx = strings.TrimSpace(sqlx)
-	if !strings.HasPrefix(sqlx, ";") {
-		sqlx = sqlx + ";"
-	}
-	sqlxx := removeDoubleSpace(sqlx)
-	sqlxx = strings.ToUpper(sqlxx)
-
-	if !strings.HasPrefix(sqlxx, "CREATE TEMP TABLE") {
-		return t, errors.New("expected sql statement to begin with: CREATE TEMP TABLE")
-	}
+	sqlxx := i.formatSQL(sqlx)
+	sqlxx = RemoveCommentsFromString(sqlxx, "/*", "*/")
 
 	v := strings.Split(sqlxx, "(")
 	t.Name = strings.TrimSpace(strings.ReplaceAll(v[0], "CREATE TEMP TABLE ", ""))
-	firstCol := strings.Split(v[1], ",")[0]
+	t.Name = strings.TrimSpace(strings.ReplaceAll(v[0], "CREATE TEMPORARY TABLE ", ""))
+	firstCol := strings.TrimSpace(strings.Split(v[1], ",")[0])
 	var c Column
 	v2 := strings.Split(firstCol, " ")
 	c.Name = v2[0]
@@ -59,20 +73,23 @@ func (i *InMemoryObjects) CreateTable(sqlx string) (Table, error) {
 			c.IsPrimaryKey = true
 		}
 		v2 := strings.Split(s, " ")
+		if len(v2) < 2 {
+			return Table{}, errors.New("malformed sql statement")
+		}
 		c.Name = v2[0]
 		c.DataType = v2[1]
 		cols = append(cols, c)
 	}
 	t.Columns = cols
 
-	// Create in-memory temp table for variable.
 	// 2 means use in-memory:
 	// PRAGMA temp_store = 0 | DEFAULT | 1 | FILE | 2 | MEMORY;
 	_, err := i.db.ExecuteNonQuery("PRAGMA temp_store = 2;")
 	if err != nil {
 		return t, err
 	}
-	_, err = i.db.ExecuteNonQuery(sqlx)
+
+	_, err = i.db.ExecuteNonQuery(sqlxx)
 	if err != nil {
 		return t, err
 	}

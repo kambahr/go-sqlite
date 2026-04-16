@@ -98,13 +98,16 @@ You can use GetResultSet() and wait for the callback to gather all result rows:
 func (d *DB) GetResultSet(sqlx string) QueryResult
 ```
 
+or write your own callback for the the Execute() func:
+```go
+func go_sqlite3_exec_callback(NotUsed *C.void, argc C.int, argv **C.char, azColName **C.char, queryID *C.char)
+```
+
 ### SQL tail - unused portion of an SQL statement
 You can add an unrelated text to the end of your SQL satement for passing additional information.
 <br />SQLite3 parses the useful part so the sql [text] and executes the SQL statement accordingly (without throwing error for the extra text).
 <br />For example, use can the following SQL statement with the Exec() func:
-```sql
-UPDATE MyTable SET Column_1 = 'Green Dalphin' WHERE MyTableID = 99; chicago branch
-```
+<br />UPDATE MyTable SET Column_1 = 'Green Dalphin' WHERE MyTableID = 99; From the daily log
 
 ### File Group
 All databases are tracked and maintained in the background. Every time a database is opened, its file handle and description are added to a global list.

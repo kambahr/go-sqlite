@@ -1,33 +1,34 @@
-// The author disclaims copyright to this source code
-// as it is dedicated to the public domain.
-// For more information, please refer to <https://unlicense.org>.
+// Copyright (C) 2024 Kamiar Bahri.
+// Use of this source code is governed by
+// Boost Software License - Version 1.0
+// that can be found in the LICENSE file.
 
 package gosqlite
 
+//#include <stdio.h>
+//#include <stdlib.h>
+//#include "sqlite3.h"
+import "C"
 import (
 	"errors"
-	"fmt"
 	"log"
+	"reflect"
 	"strings"
-	"time"
 )
 
 func (g *DBGroup) bgProc() {
 	// Ping the databases. Remove the ones that
 	// do not respond.
 	for {
-		for i := 0; i < len(g.OpenDatabases); i++ {
-
+		for i := range len(g.OpenDatabases) {
 			err := g.Ping(g.OpenDatabases[i])
 			msgTxt := "ok"
 			if err != nil {
 				msgTxt = err.Error()
 			}
-
 			if g.Verbose {
 				log.Println("ping:", g.OpenDatabases[i].Name, msgTxt)
 			}
-
 			if err != nil {
 				// remove from the list
 				newArr := make([]*DB, 0)
@@ -41,14 +42,12 @@ func (g *DBGroup) bgProc() {
 				break
 
 			} else {
-
 				db, err := g.Get(g.OpenDatabases[i].FilePath())
 				if err != nil {
 					if g.Verbose {
 						log.Println(g.OpenDatabases[i].Name, "=>", err)
 					}
 				} else {
-
 					// optimize
 					_, err := db[0].Execute("PRAGMA optimize;")
 					if err != nil {
@@ -63,25 +62,37 @@ func (g *DBGroup) bgProc() {
 							log.Println(g.OpenDatabases[i].Name, "=>", err)
 						}
 					} else {
-						if m != nil && m.(int64) > 1500 && !g.OpenDatabases[i].Busy() {
-							if g.Verbose {
-								log.Println("<<< VACUUM >>>", g.OpenDatabases[i].Name)
-							}
-							err = g.OpenDatabases[i].Vacuum()
-							if err != nil && g.Verbose {
-								log.Println(err)
+						var freeCnt int64
+						if m != nil {
+							if reflect.TypeOf(m).Kind().String() == "float64" {
+								freeCnt = int64(m.(float64))
 							} else {
-								g.OpenDatabases[i].ShrinkMemory()
+								freeCnt = m.(int64)
+							}
+							// freelist is the number pages that are being reused..
+							// This gets the db size in MB:
+							// PRAGMA page_size;
+							// PRAGMA freelist_count;
+							// select (<page_size>.0 * <freelist_count>.0) / 1024.0 / 1024.0
+							if freeCnt > 50 && !g.OpenDatabases[i].Busy() {
+								if g.Verbose {
+									log.Println("<<< VACUUM >>>", g.OpenDatabases[i].Name)
+								}
+								err = g.OpenDatabases[i].Vacuum()
+								if err != nil && g.Verbose {
+									log.Println(err)
+								} else {
+									g.OpenDatabases[i].ShrinkMemory()
+								}
 							}
 						}
 					}
 				}
 			}
 
-			time.Sleep(time.Second)
+			C.sqlite3_sleep(1000)
 		}
-
-		time.Sleep(193 * time.Second)
+		C.sqlite3_sleep(1000 * 120)
 	}
 }
 
@@ -106,18 +117,74 @@ func (m *DBGroup) Count() int {
 	return len(m.OpenDatabases)
 }
 
-func (m *DBGroup) Get(srchTxt string) ([]*DB, error) {
+func (m *DBGroup) Find(dbFilePath string) *DB {
+	for i := range m.Count() {
+		if strings.EqualFold(m.OpenDatabases[i].FilePath(), dbFilePath) {
+			return m.OpenDatabases[i]
+		}
+	}
+
+	return nil
+}
+
+func (m *DBGroup) Exists(dbFilePath string) (exists bool) {
+	for i := range m.Count() {
+		if strings.EqualFold(m.OpenDatabases[i].FilePath(), dbFilePath) {
+			return true
+		}
+	}
+
+	return
+}
+
+func applyDefaultPragma(pragma ...string) []string {
+
+	if len(pragma) == 0 {
+		pragma = append(pragma, defaultPRAGMAJournalMode)
+	}
+	found := false
+	for i := range pragma {
+		s := removeDoubleSpace(pragma[i])
+		if strings.EqualFold(s, "pragma main.secure_delete = on") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		pragma = append(pragma, "PRAGMA main.secure_delete = ON")
+	}
+
+	// https://sqlite.org/pragma.html#pragma_stats
+	// PRAGMA schema.synchronous = 0 | OFF | 1 | NORMAL | 2 | FULL | 3 | EXTRA;
+	found = false
+	for i := range pragma {
+		s := removeDoubleSpace(pragma[i])
+		if strings.EqualFold(s, "pragma main.synchronous") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		pragma = append(pragma, "PRAGMA main.synchronous = OFF")
+	}
+
+	return pragma
+}
+
+func (m *DBGroup) Get(srchTxt string, pragma ...string) ([]*DB, error) {
 
 	var arryDB []*DB
 
 	sLower := strings.ToLower(srchTxt)
 
-	for i := 0; i < m.Count(); i++ {
+	for i := range m.Count() {
 		if m.OpenDatabases[i].UniqueName == srchTxt {
 			arryDB = append(arryDB, m.OpenDatabases[i])
+			continue
 
-		} else if strings.ToLower(m.OpenDatabases[i].FilePath()) == sLower {
+		} else if strings.EqualFold(m.OpenDatabases[i].FilePath(), sLower) {
 			arryDB = append(arryDB, m.OpenDatabases[i])
+			continue
 
 		} else if strings.Contains(strings.ToLower(m.OpenDatabases[i].FilePath()), sLower) {
 			arryDB = append(arryDB, m.OpenDatabases[i])
@@ -125,34 +192,30 @@ func (m *DBGroup) Get(srchTxt string) ([]*DB, error) {
 	}
 
 	if len(arryDB) == 0 {
-
 		// try to open the database, if the file exists on disk.
 		fp := srchTxt
 		if fileOrDirExists(srchTxt) {
-			// db, err := Open(fp)
-			db, err := Open(fp,
-				/*"PRAGMA main.journal_mode = DELETE",*/
-				"PRAGMA main.secure_delete = ON")
-
+			pragma = applyDefaultPragma(pragma...)
+			db, err := Open(fp, pragma...)
 			if err != nil {
 				/* empty array */
 				arryDB = append(arryDB, &DB{})
+				return arryDB, err
+
 			} else {
-				/* opened successfully */
-				//db.JournalMode = "DELETE"
 				arryDB = append(arryDB, db)
 				m.Add(db)
 				return arryDB, err
 			}
 		} else {
-			/* return an empty db, so that the caller does not
-			get null-pointer panic */
+			// return an empty db, so that the caller does not
+			// get null-pointer panic
 			arryDB = append(arryDB, &DB{})
 			return arryDB, errors.New("no such database in the DBGroup")
 		}
 	}
 
-	/* db already existed in the grp*/
+	// db already existed in the grp
 	return arryDB, nil
 }
 
@@ -173,8 +236,18 @@ func (g *DBGroup) Add(db *DB) {
 			return
 		}
 	}
+	// compression option makes things slower, if the qitems
+	// are small to begin with!
+	// q, err := NewQueue(queue.Config{CompressItems: true})
+	// iq, errQue := NewQueue()
+	// if errQue != nil {
+	// 	log.Fatal(errQue)
+	// }
+	// db.callQueue = iq
+	// initQueue(db)
 	g.OpenDatabases = append(g.OpenDatabases, db)
-	//go db.daemon()
+
+	// go db.daemon()
 }
 
 // Remove closes the database and removes it from
@@ -183,27 +256,38 @@ func (g *DBGroup) Remove(db *DB) {
 	if db == nil {
 		return
 	}
-	indx := -1
-	for i := 0; i < len(g.OpenDatabases); i++ {
-		if g.OpenDatabases[i].UniqueName == db.UniqueName {
-			indx = i
-			break
-		}
-	}
-	if indx < 0 {
-		return
-	}
-	err := db.Close()
-	if err != nil {
-		// bad parameter or other API misuse: means the database is already closed.
-		if !strings.Contains(err.Error(), "bad parameter or other API misuse") &&
-			!strings.Contains(err.Error(), "not an error") {
-			fmt.Println("DBGroups.Remove() =>", err)
-		}
-	}
-	db = nil
 
-	// remove from array of OpenDatabases
-	g.OpenDatabases[len(g.OpenDatabases)-1], g.OpenDatabases[indx] = g.OpenDatabases[indx], g.OpenDatabases[len(g.OpenDatabases)-1]
-	g.OpenDatabases = g.OpenDatabases[:len(g.OpenDatabases)-1]
+	mCMutex.Lock()
+	defer mCMutex.Unlock()
+
+	c := make(chan int)
+	go func() {
+		indx := -1
+		for i := 0; i < len(g.OpenDatabases); i++ {
+			if g.OpenDatabases[i].UniqueName == db.UniqueName {
+				indx = i
+				break
+			}
+		}
+		if indx < 0 {
+			return
+		}
+		err := db.Close()
+		if err != nil {
+			// bad parameter or other API misuse: means the database is already closed.
+			if !strings.Contains(err.Error(), "bad parameter or other API misuse") &&
+				!strings.Contains(err.Error(), "not an error") {
+				// UNDONE
+			}
+		}
+		db = nil
+
+		// remove from array of OpenDatabases
+		if indx < len(g.OpenDatabases) {
+			g.OpenDatabases[len(g.OpenDatabases)-1], g.OpenDatabases[indx] = g.OpenDatabases[indx], g.OpenDatabases[len(g.OpenDatabases)-1]
+			g.OpenDatabases = g.OpenDatabases[:len(g.OpenDatabases)-1]
+		}
+	}()
+
+	close(c)
 }

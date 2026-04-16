@@ -1,6 +1,7 @@
-// The author disclaims copyright to this source code
-// as it is dedicated to the public domain.
-// For more information, please refer to <https://unlicense.org>.
+// Copyright (C) 2024 Kamiar Bahri.
+// Use of this source code is governed by
+// Boost Software License - Version 1.0
+// that can be found in the LICENSE file.
 
 package gosqlite
 
@@ -25,7 +26,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"regexp"
 	"strings"
 	"time"
 	"unsafe"
@@ -35,64 +35,58 @@ import (
 // see: https://sqlite.org/cintro.html.
 func (d *DB) ExecuteScalare(query string, placeHolders ...any) (any, error) {
 
-	var wrk goChanWork
-
-	mCMutex.Lock()
-	defer mCMutex.Unlock()
-
-	c := make(chan goChanWork)
-	go func() {
-		var resw goChanWork
-		s, _, err := d.Prepare(query, placeHolders)
-		if err == nil {
-			colCnt := int(C.sqlite3_column_count(s.cStmt))
-
-			if strings.Contains(query, "_rowid_") && colCnt == 0 {
-				colCnt = 1
-			}
-
-			if colCnt > 1 {
-				resw.returnObj = nil
-				resw.err = errors.New("scalare can only return one value")
-			} else {
-				rc := C.sqlite3_step(s.cStmt)
-				if rc != SQLITE_ROW {
-					err = getSQLiteErr(rc, d.DBHwnd)
-					resw.returnObj = nil
-					resw.err = err
-				} else {
-					resw.err = nil
-					resw.returnObj = d.getStmtColVal(&s, 0)
-				}
-				C.sqlite3_finalize(s.cStmt)
-			}
-		}
-		c <- resw
-	}()
-
-	wrk = <-c
-	close(c)
-
-	if wrk.err != nil && wrk.err.Error() == "no more rows available" {
-		return wrk.returnObj, nil
+	dt, err := d.GetDataTable(query, placeHolders...)
+	if err != nil {
+		return nil, err
+	}
+	if len(dt.Rows) == 0 {
+		return nil, nil
 	}
 
-	return wrk.returnObj, wrk.err
+	if len(dt.Columns) > 1 {
+		return nil, errors.New("scalare can only return one value")
+	}
+
+	return dt.Rows[0][dt.Columns[0].Name], nil
 }
+
 func (d *DB) executeNonQueryDo(query string, placeHolders []any) Result {
 	var resw Result
-	// remove the comments first; as there could be smicolons inside the comment block(s)
-	query = strings.ReplaceAll(query, "\n", " ")
-	regexptxt2 := `(?)` + regexp.QuoteMeta("/*") + `(.*?)` + regexp.QuoteMeta("*/")
-	rx := regexp.MustCompile(regexptxt2)
-	m := rx.FindAllString(query, -1)
-	for i := 0; i < len(m); i++ {
-		query = strings.ReplaceAll(query, m[i], "")
+	var tries int
+	query = strings.TrimSpace(query)
+
+	// UNDONE:  make these configurable or let the caller
+	// set them via optional args?
+	maxTries := 6
+
+	// on "database is locked"
+	// time to wait before trying again
+	// millSecToWait := time.Duration(150 * time.Millisecond)
+	millSecToWait := 150
+	sx := strings.ToUpper(removeDoubleSpace(query))
+	if d.Closed && !strings.HasPrefix(sx, "PRAGMA") &&
+		!strings.Contains(sx, "CREATE TEMP TABLE ") &&
+		!strings.Contains(sx, "CREATE TEMPORARY TABLE ") {
+
+		var err error
+
+		d, err = Open(d.filePath, "PRAGMA main.secure_delete = ON")
+		if err != nil {
+			resw.err = err
+			return resw
+		}
 	}
+	query = normalizeSQL(query)
 	v := strings.Split(query, ";")
-	for i := 0; i < len(v); i++ {
+	for i := range len(v) {
+		isDBLockedErr := false
+		tries = 0
+	tryAgain:
+		tries++
+		// It apears to run faster, if kept in
+		// this loop; vs a separate func!
 		sqlx := strings.TrimSpace(v[i])
-		if len(sqlx) == 0 {
+		if len(sqlx) < 3 {
 			continue
 		}
 		s, _, err := d.Prepare(sqlx, placeHolders)
@@ -111,42 +105,32 @@ func (d *DB) executeNonQueryDo(query string, placeHolders []any) Result {
 			C.sqlite3_finalize(s.cStmt)
 		} else {
 			resw.err = err
+			isDBLockedErr = strings.Contains(resw.err.Error(), "database is locked")
+			// do not execute the next statement (if any)
+			if !isDBLockedErr {
+				break
+			}
+		}
+		if tries <= maxTries && resw.err != nil && isDBLockedErr {
+			//time.Sleep(millSecToWait * time.Millisecond)
+			C.sqlite3_sleep(C.int(millSecToWait))
+			goto tryAgain
+
+		} else if resw.err != nil && isDBLockedErr {
+			// do not conitue with the next statement (if any)
+			break
 		}
 	}
 
 	return resw
 }
-func (d *DB) ExecuteNonQuery(query string, placeHolders ...any) (int64, error) {
 
-	var wrk Result
-
-	ExececuteNonQuerySeqNo++
-
-	mCMutex.Lock()
-	defer mCMutex.Unlock()
-
-	if ExececuteNonQuerySeqNo < 2 {
-		wrk = d.executeNonQueryDo(query, placeHolders)
-		if ExececuteNonQuerySeqNo > 0 {
-			ExececuteNonQuerySeqNo--
-		}
-
-		return wrk.rowsAffected, wrk.err
+func (d *DB) ExecuteNonQuery(query string, placeholders ...any) (int64, error) {
+	res := d.Exec(query, placeholders...)
+	if res.Error() != nil {
+		return -1, res.err
 	}
-
-	c := make(chan Result)
-	go func() {
-		var resw Result
-		resw = d.executeNonQueryDo(query, placeHolders)
-
-		c <- resw
-	}()
-	wrk = <-c
-	close(c)
-
-	ExececuteNonQuerySeqNo--
-
-	return wrk.rowsAffected, wrk.err
+	return res.rowsAffected, nil
 }
 
 // execWithResults sets the queryID and invokes the C.sqlite3_exec().
@@ -167,12 +151,11 @@ func (d *DB) execWithResults(queryID string, sqlx string) {
 
 	isDBLocked := false
 	if err != nil {
-		errTxt := err.Error()
-		if errTxt == "database is locked" {
+		if err.Error() == "database is locked" {
 			isDBLocked = true
 
-		} else if errTxt == "out of memory" {
-			log.Fatal(errTxt)
+		} else if err.Error() == "out of memory" {
+			log.Fatal(err.Error())
 		}
 	}
 
@@ -202,10 +185,10 @@ func (d *DB) execWithResults(queryID string, sqlx string) {
 				mResultQueue[i].Processed = true
 
 				// after other processes read the
-				// resultset, they many remove the element
+				// resultset, they may remove the element
 				// rapidly from the array; so it may not
 				// exist by the time this statement is reached.
-				// so, it is important to set the Finshed last.
+				// so, it is important to set the Finshed variable last.
 				mResultQueue[i].Finished = true
 				return
 			}
@@ -216,13 +199,13 @@ func (d *DB) execWithResults(queryID string, sqlx string) {
 
 func (d *DB) Execute(sqlx string) (int64, error) {
 
+	var wrk Result
+
 	if d.Closed {
 		return -1, errors.New("database is not open")
 	}
 
 	ExecuteSeqNo++
-
-	var wrk Result
 
 	mCMutex.Lock()
 	defer mCMutex.Unlock()
@@ -235,17 +218,9 @@ func (d *DB) Execute(sqlx string) (int64, error) {
 			resw.err = errors.New("database no longer available")
 		} else {
 			// execute sql statement(s)
-			// remove the comments first; as there could be smicolons inside the comment block(s)
-			sqlx = strings.ReplaceAll(sqlx, "\n", " ")
-			regexptxt2 := `(?)` + regexp.QuoteMeta("/*") + `(.*?)` + regexp.QuoteMeta("*/")
-			rx := regexp.MustCompile(regexptxt2)
-			m := rx.FindAllString(sqlx, -1)
-			for i := 0; i < len(m); i++ {
-				sqlx = strings.ReplaceAll(sqlx, m[i], "")
-			}
-
+			sqlx = normalizeSQL(sqlx)
 			v := strings.Split(sqlx, ";")
-			for i := 0; i < len(v); i++ {
+			for i := range v {
 				query := strings.TrimSpace(v[i])
 				if len(query) == 0 {
 					continue

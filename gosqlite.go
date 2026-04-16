@@ -1,6 +1,7 @@
-// The author disclaims copyright to this source code
-// as it is dedicated to the public domain.
-// For more information, please refer to <https://unlicense.org>.
+// Copyright (C) 2024 Kamiar Bahri.
+// Use of this source code is governed by
+// Boost Software License - Version 1.0
+// that can be found in the LICENSE file.
 
 package gosqlite
 
@@ -19,9 +20,7 @@ import (
 	"unsafe"
 )
 
-// CreateDatabase creates a new database with a
-// default user table.
-func CreateDatabase(dbFilePath string) error {
+func CreateDatabase(dbFilePath string, noBuiltInTables ...bool) error {
 
 	if fileOrDirExists(dbFilePath) {
 		return errors.New("db file already exists")
@@ -40,27 +39,29 @@ func CreateDatabase(dbFilePath string) error {
 	defer C.free(unsafe.Pointer(fName))
 	C.sqlite3_open(fName, &db)
 
-	timenow := time.Now().String()
-	sqlx := C.CString(
-		fmt.Sprintf(
-			`
+	if len(noBuiltInTables) == 0 {
+		timenow := time.Now().String()
+		sqlx := C.CString(
+			fmt.Sprintf(
+				`
 		CREATE TABLE IF NOT EXISTS dbx_user (
-			UserID INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, 
-			Name	        TEXT NOT NULL,
-			UserName        TEXT NOT NULL,
-			Email	        TEXT,
-			Password        TEXT,
-			Permissions     TEXT, /* possible values: r,w, or rw (read, write or read-write) */
-			DateTimeCreated TEXT NOT NULL
+			"UserID" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, 
+			"Name"	        TEXT NOT NULL,
+			"UserName"        TEXT NOT NULL,
+			"Email"	        TEXT,
+			"Password"        TEXT,
+			"Permissions"     TEXT,  /* possible values: r,w, or rw (read, write or read-write) */
+			"DateTimeCreated" TEXT NOT NULL
 		);
 		CREATE UNIQUE INDEX INX_dbx_user_UserName ON dbx_user (UserName);
 		CREATE INDEX INX_dbx_user_DateTimeCreated ON dbx_user (DateTimeCreated);
 		insert into dbx_user
 		select 1,'administrator','admin',NULL,'password','rw', '%s' 
 		WHERE NOT EXISTS (SELECT 1 FROM dbx_user WHERE UserName='admin');`, timenow))
+		defer C.free(unsafe.Pointer(sqlx))
+		rc = C.sqlite3_exec(db, sqlx, nil, nil, nil)
+	}
 
-	rc = C.sqlite3_exec(db, sqlx, nil, nil, nil)
-	C.free(unsafe.Pointer(sqlx))
 	C.sqlite3_close(db)
 
 	if int(rc) == SQLITE_OK {
@@ -70,7 +71,9 @@ func CreateDatabase(dbFilePath string) error {
 	return errors.New(GetErrText(int(rc)))
 }
 
+// OpenV2Exclusive opens a database exclusively.
 func OpenV2Exclusive(dbFilePath string, pragma ...string) (*DB, error) {
+	pragma = applyDefaultPragma(pragma...)
 	dhwnd, err := openV2(dbFilePath,
 		C.SQLITE_OPEN_EXCLUSIVE|
 			C.SQLITE_OPEN_READWRITE|
@@ -84,7 +87,6 @@ func OpenV2Exclusive(dbFilePath string, pragma ...string) (*DB, error) {
 // the database is ready for operation, typically journal-mode
 // PRAGMAs.
 func OpenV2Readonly(dbFilePath string, pragma ...string) (*DB, error) {
-
 	dhwnd, err := openV2(dbFilePath,
 		C.SQLITE_OPEN_READONLY|
 			C.SQLITE_OPEN_EXRESCODE|
@@ -114,6 +116,10 @@ func OpenV2(dbFilePath string, pragma ...string) (*DB, error) {
 	return dhwnd, err
 }
 
+// CreateDabaseInMemory is an alias for OpenMemory()
+func CreateDabaseInMemory(vfsName ...string) (*DB, error) {
+	return OpenMemory(vfsName...)
+}
 func OpenMemory(vfsName ...string) (*DB, error) {
 
 	var vfsNamex string
@@ -121,12 +127,22 @@ func OpenMemory(vfsName ...string) (*DB, error) {
 	if len(vfsName) > 0 {
 		vfsNamex = vfsName[0]
 	} else {
+		// https://sqlite.org/vfs.html
+		// unix-excl - obtains and holds an exclusive lock on database files,
+		// preventing other processes from accessing the database.
+		// Also keeps the wal-index in heap rather than in shared memory.
 		vfsNamex = "unix-excl"
 	}
 
-	d := initDB("")
+	// create a unique uri:
+	// see: https://sqlite.org/uri.html
+	uniqStr := createHash(time.Now().String())
+	uriPath := fmt.Sprintf("%s-in-memory:?cache=shared", uniqStr)
+	d := initDB(uriPath, true)
 
-	fMem := C.CString(":memory:?cache=shared")
+	fMem := C.CString(uriPath)
+
+	//fMem := C.CString(":memory:?cache=shared")
 	defer C.free(unsafe.Pointer(fMem))
 
 	// see: https: //www.sqlite.org/vfs.html
@@ -154,6 +170,18 @@ func OpenMemory(vfsName ...string) (*DB, error) {
 	return &d, err
 }
 
+// DBCacheFlush Flush caches to disk mid-transaction.
+// See: https://www.sqlite.org/c3ref/db_cacheflush.html
+func DBCacheFlush(d *DB) error {
+	var err error
+	rc := C.sqlite3_db_cacheflush(d.DBHwnd)
+	if rc != SQLITE_OK {
+		err = getSQLiteErr(rc, d.DBHwnd)
+	}
+
+	return err
+}
+
 // Open opens an SQLite database and returns a pointer to DB.
 // pragma is a list of PRAGMA command to be applied before
 // the database is ready for operation, typically journal-mode
@@ -161,11 +189,18 @@ func OpenMemory(vfsName ...string) (*DB, error) {
 func Open(dbFilePath string, pragma ...string) (*DB, error) {
 
 	if !fileOrDirExists(dbFilePath) {
-		return nil, errors.New("database file does not exists")
+		if strings.HasPrefix(dbFilePath, "file:") {
+			return nil, errors.New("database file does not exists; if this is in-memory database, try attach()")
+
+		} else {
+			return nil, errors.New("database file does not exists")
+		}
 	}
 
 	// see https://www.sqlite.org/pragma.html#pragma_secure_delete
-	pragma = append(pragma, "PRAGMA main.secure_delete = ON")
+	// if !slices.Contains(pragma, "PRAGMA main.secure_delete = ON") {
+	// 	pragma = append(pragma, "PRAGMA main.secure_delete = ON")
+	// }
 
 	initGrouper()
 
@@ -261,13 +296,11 @@ func EncryptDBFile(dbPath string, encFilePath string, pwdPhrs string) error {
 // https://www.sqlite.org/c3ref/open.html#urifilenameexamples
 // https://www.sqlite.org/vfs.html
 func openV2(dbFilePath string, flag C.int, vfsName string, pragma []string) (*DB, error) {
+	pragma = applyDefaultPragma(pragma...)
 
 	if dbFilePath == "" || !fileOrDirExists(dbFilePath) {
 		return nil, errors.New("database file does not exist")
 	}
-
-	// see https://www.sqlite.org/pragma.html#pragma_secure_delete
-	pragma = append(pragma, "PRAGMA main.secure_delete = ON")
 
 	initGrouper()
 
@@ -294,7 +327,7 @@ func openV2(dbFilePath string, flag C.int, vfsName string, pragma []string) (*DB
 	}
 
 	// see: https://sqlite.org/pragma.html#pragma_journal_mode
-	for i := 0; i < len(pragma); i++ {
+	for i := range pragma {
 		_, err := d.Execute(pragma[i])
 		if err != nil {
 			return nil, err
@@ -304,6 +337,38 @@ func openV2(dbFilePath string, flag C.int, vfsName string, pragma []string) (*DB
 	DBGrp.Add(&d)
 
 	return &d, err
+}
+
+func ExecuteNonQueryFromFile(dbFilePath, query string, placeHolders ...any) (int64, error) {
+
+	dx, err := DBGrp.Get(dbFilePath)
+	if err != nil {
+		return -1, err
+	}
+	rowsAffected, err := dx[0].ExecuteNonQuery(query, placeHolders...)
+	return rowsAffected, err
+}
+
+// GetOpenedDB returns a pointer to daabasee
+// that is already open.
+func GetOpenedDB(fp string) *DB {
+	for i := 0; i < len(DBGrp.Base().OpenDatabases); i++ {
+		if DBGrp.Base().OpenDatabases[i].FilePath() == fp {
+			return DBGrp.Base().OpenDatabases[i]
+		}
+	}
+
+	return nil
+}
+
+func GetDataTableFromFile(dbFilePath, query string, placeHolders ...any) (*DataTable, error) {
+	dx, err := DBGrp.Get(dbFilePath)
+	if err != nil {
+		return nil, err
+	}
+
+	dt, err := dx[0].GetDataTable(query, placeHolders...)
+	return dt, err
 }
 
 // CreateGroup creates a new directory on the file system.
@@ -432,6 +497,24 @@ func GetErrText(errN int) string {
 	return errTxt
 }
 
+func DeleteJournalfiles(dbFilePath string) {
+	fileName := filepath.Base(dbFilePath)
+	fileNameNoExt := strings.TrimSuffix(fileName, filepath.Ext(fileName))
+	dir := filepath.Dir(dbFilePath)
+
+	shm := fmt.Sprintf("%s/%s.sqlite-shm", dir, fileNameNoExt)
+	os.Remove(shm)
+
+	wal := fmt.Sprintf("%s/%s.sqlite-wal", dir, fileNameNoExt)
+	os.Remove(wal)
+
+	j := fmt.Sprintf("%s/%s.journal", dir, fileNameNoExt)
+	os.Remove(j)
+
+	j = fmt.Sprintf("%s/%s.sqlite-journal", dir, fileNameNoExt)
+	os.Remove(j)
+}
+
 // --------- other public ----------
 func GetTableNameFromSQLQuery(sqlQuery string) string {
 	sqlQueryLower := strings.ToLower(sqlQuery)
@@ -462,33 +545,22 @@ func GetTableNameFromSQLQuery(sqlQuery string) string {
 	return ""
 }
 
-// TODO: Compress/depress data before/after writing to the database
-//       on-demand?
-//
-// func CompressBytes(b []byte) ([]byte, error) {
+// Interrupt inetrrupts a longer running query
+// in a database. It returns true if the query
+// was iterrupted.
+func Interrupt(dbFilePath string) bool {
 
-// 	var buf bytes.Buffer
-// 	gw, err := gzip.NewWriterLevel(&buf, gzip.DefaultCompression)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	gw.Write(b)
-// 	gw.Close()
+	d, err := DBGrp.Get(dbFilePath)
+	if err != nil {
+		return false
+	}
 
-// 	return buf.Bytes(), nil
-// }
+	if d[0].Closed {
+		return false
+	}
 
-// func DecompressBytes(b []byte) ([]byte, error) {
+	C.sqlite3_interrupt(d[0].DBHwnd)
+	rc := C.sqlite3_is_interrupted(d[0].DBHwnd)
 
-// 	buf := bytes.NewBuffer(b)
-// 	gzipReader, err := gzip.NewReader(buf)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-
-// 	r := make([]byte, len(buf.Bytes()))
-// 	gzipReader.Read(r)
-// 	gzipReader.Close()
-
-// 	return r, nil
-// }
+	return int(rc) == 1
+}
