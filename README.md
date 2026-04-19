@@ -61,7 +61,7 @@ func main() {
 }
 ```
 ## 🧠 Advanced Capabilities
-The DBGroup Manager
+### The DBGroup Manager
 Whenever a database is opened via Open(), it is attached to the global DBGroup tracker. This daemon routine:
 
 Pings connections safely to drop orphaned handles.
